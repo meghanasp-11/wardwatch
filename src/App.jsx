@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   HeartPulse,
   Activity,
@@ -353,8 +353,30 @@ export default function App() {
   const [patients, setPatients] = useState(INITIAL_PATIENTS);
   const [selectedId, setSelectedId] = useState('p-1');
   const [activeTab, setActiveTab] = useState('protocol'); // 'protocol' | 'sbar' | 'fhir'
+  const [fromBackend, setFromBackend] = useState(false);
   const [copiedKey, setCopiedKey] = useState(null);
   const [showAdmitModal, setShowAdmitModal] = useState(false);
+
+  // Load patients from backend API on mount, with INITIAL_PATIENTS as fallback
+  useEffect(() => {
+    async function bootstrap() {
+      try {
+        const res = await fetch('/api/patients');
+        if (!res.ok) throw new Error('Backend fetch failed');
+        const data = await res.json();
+        if (data.patients && data.patients.length > 0) {
+          setPatients(data.patients);
+          setFromBackend(true);
+        } else {
+          setFromBackend(false); // keep INITIAL_PATIENTS
+        }
+      } catch (e) {
+        console.warn('Backend unavailable, using initial patients:', e.message);
+        setFromBackend(false); // keep INITIAL_PATIENTS
+      }
+    }
+    bootstrap();
+  }, []);
 
   // Admit Patient Form State
   const [newPatient, setNewPatient] = useState({
@@ -414,84 +436,136 @@ export default function App() {
   };
 
   // Simulate +2 Hours progression (appends a new timestamped reading to trajectory)
-  const handleSimulateTwoHours = () => {
-    setPatients((prev) =>
-      prev.map((p) => {
-        if (p.id !== activePatient.id) return p;
-        const curr = p.history[p.history.length - 1];
-        const [hh, mm] = curr.time.split(':').map(Number);
-        const nextHour = String((hh + 2) % 24).padStart(2, '0');
-        const nextTime = `${nextHour}:${String(mm).padStart(2, '0')}`;
+  const handleSimulateTwoHours = async () => {
+    try {
+      const res = await fetch(`/api/patients/${activePatient.id}/simulate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ direction: 'recover', persist: false }),
+      });
+      if (!res.ok) throw new Error('Simulation failed');
+      const data = await res.json();
+      setPatients((prev) => [...prev, data]); // data has history appended
+    } catch (err) {
+      console.error('Simulate error:', err);
+      // Fallback: local simulation
+      setPatients((prev) =>
+        prev.map((p) => {
+          if (p.id !== activePatient.id) return p;
+          const curr = p.history[p.history.length - 1];
+          const [hh, mm] = curr.time.split(':').map(Number);
+          const nextHour = String((hh + 2) % 24).padStart(2, '0');
+          const nextTime = `${nextHour}:${String(mm).padStart(2, '0')}`;
 
-        // Realistic clinical trajectory: recovering patient improves slightly; others show early deterioration
-        const isRecovering = p.id === 'p-6';
-        const nextVitals = isRecovering
-          ? {
-              time: nextTime,
-              resp_rate: Math.max(14, curr.resp_rate - 1),
-              spo2: Math.min(99, curr.spo2 + 1),
-              on_oxygen: false,
-              systolic_bp: Math.min(126, curr.systolic_bp + 2),
-              heart_rate: Math.max(72, curr.heart_rate - 3),
-              temp: Number(Math.max(36.7, curr.temp - 0.1).toFixed(1)),
-              consciousness: 'A'
-            }
-          : {
-              time: nextTime,
-              resp_rate: Math.min(34, curr.resp_rate + 3),
-              spo2: Math.max(85, curr.spo2 - (p.spo2_scale === 2 ? 1 : 2)),
-              on_oxygen: true,
-              systolic_bp: Math.max(78, curr.systolic_bp - 8),
-              heart_rate: Math.min(148, curr.heart_rate + 10),
-              temp: Number(Math.min(40.2, curr.temp + 0.4).toFixed(1)),
-              consciousness: curr.systolic_bp - 8 <= 92 && curr.consciousness === 'A' ? 'C' : curr.consciousness
-            };
+          // Realistic clinical trajectory: recovering patient improves slightly; others show early deterioration
+          const isRecovering = p.id === 'p-6';
+          const nextVitals = isRecovering
+            ? {
+                time: nextTime,
+                resp_rate: Math.max(14, curr.resp_rate - 1),
+                spo2: Math.min(99, curr.spo2 + 1),
+                on_oxygen: false,
+                systolic_bp: Math.min(126, curr.systolic_bp + 2),
+                heart_rate: Math.max(72, curr.heart_rate - 3),
+                temp: Number(Math.max(36.7, curr.temp - 0.1).toFixed(1)),
+                consciousness: 'A'
+              }
+            : {
+                time: nextTime,
+                resp_rate: Math.min(34, curr.resp_rate + 3),
+                spo2: Math.max(85, curr.spo2 - (p.spo2_scale === 2 ? 1 : 2)),
+                on_oxygen: true,
+                systolic_bp: Math.max(78, curr.systolic_bp - 8),
+                heart_rate: Math.min(148, curr.heart_rate + 10),
+                temp: Number(Math.min(40.2, curr.temp + 0.4).toFixed(1)),
+                consciousness: curr.systolic_bp - 8 <= 92 && curr.consciousness === 'A' ? 'C' : curr.consciousness
+              };
 
-        return {
-          ...p,
-          history: [...p.history.slice(-5), nextVitals]
-        };
-      })
-    );
+          return {
+            ...p,
+            history: [...p.history.slice(-5), nextVitals]
+          };
+        })
+      );
+    }
   };
 
   // Admit a new patient into the ward census
-  const handleAdmitSubmit = (e) => {
+  const handleAdmitSubmit = async (e) => {
     e.preventDefault();
     if (!newPatient.name.trim()) return;
-    const createdId = `p-${Date.now()}`;
-    const created = {
-      id: createdId,
-      name: newPatient.name.trim(),
-      age: Number(newPatient.age) || 55,
-      bed_number: newPatient.bed_number.trim() || 'Bed 07-A',
-      condition: newPatient.condition.trim() || 'Observation',
-      spo2_scale: Number(newPatient.spo2_scale),
-      meds_and_labs: newPatient.meds_and_labs.trim() || 'Baseline labs ordered',
-      history: [
-        {
-          time: '12:00',
-          resp_rate: 19,
-          spo2: newPatient.spo2_scale === 2 ? 90 : 96,
-          on_oxygen: false,
-          systolic_bp: 118,
-          heart_rate: 92,
-          temp: 37.5,
-          consciousness: 'A'
-        }
-      ]
-    };
-    setPatients((prev) => [...prev, created]);
-    setSelectedId(createdId);
-    setShowAdmitModal(false);
-    setNewPatient({
-      name: '',
-      age: 60,
-      bed_number: 'Bed 07-B',
-      condition: 'Suspected Sepsis / Fever',
-      spo2_scale: 1,
-      meds_and_labs: 'Pending blood cultures, IV fluids'
-    });
+    try {
+      const res = await fetch('/api/patients', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newPatient.name.trim(),
+          age: Number(newPatient.age) || 55,
+          bed_number: newPatient.bed_number.trim() || 'Bed 07-A',
+          condition: newPatient.condition.trim() || 'Observation',
+          spo2_scale: Number(newPatient.spo2_scale),
+          meds_and_labs: newPatient.meds_and_labs.trim() || 'Baseline labs ordered',
+          vitals: {
+            resp_rate: 19,
+            spo2: newPatient.spo2_scale === 2 ? 90 : 96,
+            on_oxygen: false,
+            systolic_bp: 118,
+            heart_rate: 92,
+            temp: 37.5,
+            consciousness: 'A'
+          }
+        }),
+      });
+      if (!res.ok) throw new Error('Failed to admit patient');
+      const created = await res.json();
+      setPatients((prev) => [...prev, created]);
+      setSelectedId(created.id);
+      setShowAdmitModal(false);
+      setNewPatient({
+        name: '',
+        age: 60,
+        bed_number: 'Bed 07-B',
+        condition: 'Suspected Sepsis / Fever',
+        spo2_scale: 1,
+        meds_and_labs: 'Pending blood cultures, IV fluids'
+      });
+    } catch (err) {
+      console.error('Admit error:', err);
+      // Fallback: create locally
+      const createdId = `p-${Date.now()}`;
+      const created = {
+        id: createdId,
+        name: newPatient.name.trim(),
+        age: Number(newPatient.age) || 55,
+        bed_number: newPatient.bed_number.trim() || 'Bed 07-A',
+        condition: newPatient.condition.trim() || 'Observation',
+        spo2_scale: Number(newPatient.spo2_scale),
+        meds_and_labs: newPatient.meds_and_labs.trim() || 'Baseline labs ordered',
+        history: [
+          {
+            time: '12:00',
+            resp_rate: 19,
+            spo2: newPatient.spo2_scale === 2 ? 90 : 96,
+            on_oxygen: false,
+            systolic_bp: 118,
+            heart_rate: 92,
+            temp: 37.5,
+            consciousness: 'A'
+          }
+        ]
+      };
+      setPatients((prev) => [...prev, created]);
+      setSelectedId(createdId);
+      setShowAdmitModal(false);
+      setNewPatient({
+        name: '',
+        age: 60,
+        bed_number: 'Bed 07-B',
+        condition: 'Suspected Sepsis / Fever',
+        spo2_scale: 1,
+        meds_and_labs: 'Pending blood cultures, IV fluids'
+      });
+    }
   };
 
   // Clipboard copy helper

@@ -1,0 +1,16 @@
+{
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/[...path].js" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store"
+        }
+      ]
+    }
+  ]
+}
